@@ -643,3 +643,46 @@ SELECT * FROM typetest2 ORDER BY id;
 COMMIT;
 -- we need to re-establish the connection after changing "timezone"
 SELECT oracle_close_connections();
+
+-- Register same-named, differently typed inherited keys before pruning the scans.
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_KEY_A (note NUMBER, id NUMBER PRIMARY KEY)');
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_KEY_B (note NUMBER, id NUMBER PRIMARY KEY)');
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_KEY_A VALUES (10,1)');
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_KEY_B VALUES (20,2)');
+CREATE TABLE inherit_keys (note int);
+CREATE FOREIGN TABLE inherit_keys_a (id int OPTIONS (key 'true'))
+  INHERITS (inherit_keys) SERVER oracle OPTIONS (schema 'SCOTT', table 'FDW_KEY_A');
+CREATE FOREIGN TABLE inherit_keys_b (id bigint OPTIONS (key 'true'))
+  INHERITS (inherit_keys) SERVER oracle OPTIONS (schema 'SCOTT', table 'FDW_KEY_B');
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+DELETE FROM inherit_keys WHERE false RETURNING note;
+-- Same-named keys can also differ in type modifier or collation.
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE varchar(10);
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE varchar(20);
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE text COLLATE "C";
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE text COLLATE "POSIX";
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE int;
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE bigint;
+-- Re-adding the key changes its column number and leaves a dropped attribute.
+ALTER FOREIGN TABLE inherit_keys_b DROP COLUMN id;
+ALTER FOREIGN TABLE inherit_keys_b ADD COLUMN id int OPTIONS (key 'true');
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE bigint;
+-- Direct child modifications also verify lookup of the renamed junk attributes.
+BEGIN;
+UPDATE ONLY inherit_keys_a SET note=note+1 RETURNING note;
+UPDATE ONLY inherit_keys_b SET note=note+1 RETURNING note;
+ROLLBACK;
+BEGIN;
+DELETE FROM ONLY inherit_keys_a RETURNING note;
+DELETE FROM ONLY inherit_keys_b RETURNING note;
+ROLLBACK;
+SELECT note FROM ONLY inherit_keys_a UNION ALL SELECT note FROM ONLY inherit_keys_b ORDER BY note;
+DROP TABLE inherit_keys CASCADE;
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_KEY_A PURGE');
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_KEY_B PURGE');

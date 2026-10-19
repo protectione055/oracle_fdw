@@ -1481,6 +1481,9 @@ oracleAddForeignUpdateTargets(
 		List *options;
 		ListCell *option;
 
+		if (att->attisdropped)
+			continue;
+
 		/* look for the "key" option on this column */
 		options = GetForeignColumnOptions(relid, attrno);
 		foreach(option, options)
@@ -1508,7 +1511,7 @@ oracleAddForeignUpdateTargets(
 					/* Wrap it in a resjunk TLE with the right name ... */
 					tle = makeTargetEntry((Expr *)var,
 							list_length(parsetree->targetList) + 1,
-							pstrdup(NameStr(att->attname)),
+							psprintf("oracle_fdw_key_%u_%d", relid, attrno),
 							true);
 
 					/* ... and add it to the query's targetlist */
@@ -1523,7 +1526,9 @@ oracleAddForeignUpdateTargets(
 							att->attcollation,
 							0);
 
-					add_row_identity_var(root, var, rtindex, NameStr(att->attname));
+					/* Give each target table's key column its own row identity. */
+					add_row_identity_var(root, var, rtindex,
+						psprintf("oracle_fdw_key_%u_%d", relid, attrno));
 #endif  /* PG_VERSION_NUM */
 
 					has_key = true;
@@ -1874,13 +1879,17 @@ oracleBeginForeignModify(ModifyTableState *mtstate, ResultRelInfo *rinfo, List *
 	/* loop through table columns */
 	for (i=0; i<fdw_state->oraTable->ncols; ++i)
 	{
-		if (! fdw_state->oraTable->cols[i]->pkey)
+		if (mtstate->operation == CMD_INSERT || !fdw_state->oraTable->cols[i]->pkey)
 			continue;
 
 		/* for primary key columns, get the resjunk attribute number and store it in "pkey" */
 		fdw_state->oraTable->cols[i]->pkey =
 			ExecFindJunkAttributeInTlist(subplan->targetlist,
-				fdw_state->oraTable->cols[i]->pgname);
+				psprintf("oracle_fdw_key_%u_%d", RelationGetRelid(rinfo->ri_RelationDesc),
+					 fdw_state->oraTable->cols[i]->pgattnum));
+		if (fdw_state->oraTable->cols[i]->pkey == InvalidAttrNumber)
+			elog(ERROR, "could not find junk attribute for key column \"%s\"",
+				 fdw_state->oraTable->cols[i]->pgname);
 	}
 
 	/* create a memory context for short-lived memory */

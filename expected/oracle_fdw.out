@@ -980,3 +980,133 @@ SELECT oracle_close_connections();
  
 (1 row)
 
+-- Register same-named, differently typed inherited keys before pruning the scans.
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_KEY_A (note NUMBER, id NUMBER PRIMARY KEY)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_KEY_B (note NUMBER, id NUMBER PRIMARY KEY)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_KEY_A VALUES (10,1)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_KEY_B VALUES (20,2)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+CREATE TABLE inherit_keys (note int);
+CREATE FOREIGN TABLE inherit_keys_a (id int OPTIONS (key 'true'))
+  INHERITS (inherit_keys) SERVER oracle OPTIONS (schema 'SCOTT', table 'FDW_KEY_A');
+CREATE FOREIGN TABLE inherit_keys_b (id bigint OPTIONS (key 'true'))
+  INHERITS (inherit_keys) SERVER oracle OPTIONS (schema 'SCOTT', table 'FDW_KEY_B');
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+-- Same-named keys can also differ in type modifier or collation.
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE varchar(10);
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE varchar(20);
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE text COLLATE "C";
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE text COLLATE "POSIX";
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+ALTER FOREIGN TABLE inherit_keys_a ALTER COLUMN id TYPE int;
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE bigint;
+-- Re-adding the key changes its column number and leaves a dropped attribute.
+ALTER FOREIGN TABLE inherit_keys_b DROP COLUMN id;
+ALTER FOREIGN TABLE inherit_keys_b ADD COLUMN id int OPTIONS (key 'true');
+UPDATE inherit_keys SET note=note+1 WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+DELETE FROM inherit_keys WHERE false RETURNING note;
+ note 
+------
+(0 rows)
+
+ALTER FOREIGN TABLE inherit_keys_b ALTER COLUMN id TYPE bigint;
+-- Direct child modifications also verify lookup of the renamed junk attributes.
+BEGIN;
+UPDATE ONLY inherit_keys_a SET note=note+1 RETURNING note;
+ note 
+------
+   11
+(1 row)
+
+UPDATE ONLY inherit_keys_b SET note=note+1 RETURNING note;
+ note 
+------
+   21
+(1 row)
+
+ROLLBACK;
+BEGIN;
+DELETE FROM ONLY inherit_keys_a RETURNING note;
+ note 
+------
+   10
+(1 row)
+
+DELETE FROM ONLY inherit_keys_b RETURNING note;
+ note 
+------
+   20
+(1 row)
+
+ROLLBACK;
+SELECT note FROM ONLY inherit_keys_a UNION ALL SELECT note FROM ONLY inherit_keys_b ORDER BY note;
+ note 
+------
+   10
+   20
+(2 rows)
+
+DROP TABLE inherit_keys CASCADE;
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_KEY_A PURGE');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_KEY_B PURGE');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
