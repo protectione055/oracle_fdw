@@ -980,3 +980,82 @@ SELECT oracle_close_connections();
  
 (1 row)
 
+-- Each child uses its parent's permission entry on PostgreSQL 16 and later.
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_INHERIT_A (note NUMBER, id NUMBER PRIMARY KEY)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_INHERIT_B (note NUMBER, id NUMBER PRIMARY KEY)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_INHERIT_A VALUES (10,1)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_INHERIT_B VALUES (20,2)');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+CREATE TABLE inherit_permissions (note int);
+CREATE FOREIGN TABLE inherit_permissions_a (id int OPTIONS (key 'true'))
+  INHERITS (inherit_permissions) SERVER oracle
+  OPTIONS (schema 'SCOTT', table 'FDW_INHERIT_A');
+CREATE FOREIGN TABLE inherit_permissions_b (id int OPTIONS (key 'true'))
+  INHERITS (inherit_permissions) SERVER oracle
+  OPTIONS (schema 'SCOTT', table 'FDW_INHERIT_B');
+SELECT note FROM inherit_permissions ORDER BY note;
+ note 
+------
+   10
+   20
+(2 rows)
+
+BEGIN;
+WITH changed AS (
+  UPDATE inherit_permissions SET note=note+1 RETURNING note
+) SELECT note FROM changed ORDER BY note;
+ note 
+------
+   11
+   21
+(2 rows)
+
+WITH removed AS (
+  DELETE FROM inherit_permissions WHERE note>10 RETURNING note
+) SELECT note FROM removed ORDER BY note;
+ note 
+------
+   11
+   21
+(2 rows)
+
+ROLLBACK;
+SELECT note FROM inherit_permissions ORDER BY note;
+ note 
+------
+   10
+   20
+(2 rows)
+
+DROP TABLE inherit_permissions CASCADE;
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_INHERIT_A PURGE');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_INHERIT_B PURGE');
+ oracle_execute 
+----------------
+ 
+(1 row)
+

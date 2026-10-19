@@ -804,17 +804,25 @@ oracleGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntable
 	struct OracleFdwState *fdwState;
 	int i;
 	double ntuples = -1;
+#if PG_VERSION_NUM < 160000
 	RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
+#endif
 	Oid check_user;
 
 	/*
 	 * Get the user whose user mapping should be used (if invalid, the current
 	 * user is used).
+	 * Before PostgreSQL v16, checkAsUser is stored directly in the RTE.
+	 * Since v16, it is stored in a separate RTEPermissionInfo.  For inherited
+	 * access, permissions are checked on the named parent, so child RTEs
+	 * created by inheritance expansion have no permission info of their own.
+	 * Use RelOptInfo.userid, which the planner sets from the relation's own
+	 * permission info or inherits from its parent.
 	 */
 #if PG_VERSION_NUM < 160000
 	check_user = rte->checkAsUser;
 #else
-	check_user = getRTEPermissionInfo(root->parse->rteperminfos, rte)->checkAsUser;
+	check_user = baserel->userid;
 #endif  /* PG_VERSION_NUM < 160000 */
 
 	elog(DEBUG1, "oracle_fdw: plan foreign table scan");
@@ -1568,12 +1576,24 @@ oraclePlanForeignModify(PlannerInfo *root, ModifyTable *plan, Index resultRelati
 	Oid check_user;
 
 	/*
-	 * Get the user for permission checks.
+	 * Get the user whose user mapping should be used.
+	 * INSERT targets may have no RelOptInfo.  For scanned targets, use
+	 * RelOptInfo.userid, which also handles inherited permission information.
 	 */
 #if PG_VERSION_NUM >= 160000
-	RTEPermissionInfo *perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
+	if (operation == CMD_INSERT)
+	{
+		RTEPermissionInfo *perminfo;
 
-	check_user = perminfo->checkAsUser;
+		perminfo = getRTEPermissionInfo(root->parse->rteperminfos, rte);
+		check_user = perminfo->checkAsUser;
+	}
+	else
+	{
+		RelOptInfo *roi = find_base_rel(root, resultRelation);
+
+		check_user = roi->userid;
+	}
 #else
 	check_user = rte->checkAsUser;
 #endif  /* PG_VERSION_NUM >= 160000 */

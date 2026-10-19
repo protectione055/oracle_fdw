@@ -643,3 +643,31 @@ SELECT * FROM typetest2 ORDER BY id;
 COMMIT;
 -- we need to re-establish the connection after changing "timezone"
 SELECT oracle_close_connections();
+
+-- Each child uses its parent's permission entry on PostgreSQL 16 and later.
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_INHERIT_A (note NUMBER, id NUMBER PRIMARY KEY)');
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_INHERIT_B (note NUMBER, id NUMBER PRIMARY KEY)');
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_INHERIT_A VALUES (10,1)');
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_INHERIT_B VALUES (20,2)');
+
+CREATE TABLE inherit_permissions (note int);
+CREATE FOREIGN TABLE inherit_permissions_a (id int OPTIONS (key 'true'))
+  INHERITS (inherit_permissions) SERVER oracle
+  OPTIONS (schema 'SCOTT', table 'FDW_INHERIT_A');
+CREATE FOREIGN TABLE inherit_permissions_b (id int OPTIONS (key 'true'))
+  INHERITS (inherit_permissions) SERVER oracle
+  OPTIONS (schema 'SCOTT', table 'FDW_INHERIT_B');
+SELECT note FROM inherit_permissions ORDER BY note;
+BEGIN;
+WITH changed AS (
+  UPDATE inherit_permissions SET note=note+1 RETURNING note
+) SELECT note FROM changed ORDER BY note;
+WITH removed AS (
+  DELETE FROM inherit_permissions WHERE note>10 RETURNING note
+) SELECT note FROM removed ORDER BY note;
+ROLLBACK;
+SELECT note FROM inherit_permissions ORDER BY note;
+DROP TABLE inherit_permissions CASCADE;
+
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_INHERIT_A PURGE');
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_INHERIT_B PURGE');
