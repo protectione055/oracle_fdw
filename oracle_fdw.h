@@ -134,8 +134,15 @@ struct oraColumn
 	int varno;          /* range table index of this column's relation */
 };
 
+typedef enum
+{
+	ORA_ORGANIZATION_HEAP,
+	ORA_ORGANIZATION_INDEX
+} oraOrganization;
+
 struct oraTable
 {
+	oraOrganization organization;
 	char *name;    /* name in Oracle */
 	char *pgname;  /* for error messages */
 	int ncols;     /* number of columns */

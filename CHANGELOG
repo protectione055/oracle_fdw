@@ -10,6 +10,8 @@ Version 2.10.0
   - Add a CI workflow that automatically tests new commits against PostgreSQL
     v18 and both Oracle server 21/client 19 and Oracle server 23/client 23.
     Patch by Ziming Zhang.
+  - Add the "organization" foreign table option to distinguish heap tables
+    from index-organized tables.
 
 Version 2.9.0, released 2026-06-08
 

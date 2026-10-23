@@ -1008,3 +1008,39 @@ SELECT * FROM b;
 (2 rows)
 
 ROLLBACK;
+
+-- Exercise cached scans with heap, index, and default organization.
+-- ROLLBACK restores the existing table definition.
+BEGIN;
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'heap');
+PREPARE organization_plan AS SELECT id FROM typetest1 WHERE id = 1;
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (SET organization 'index');
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (DROP organization);
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+DEALLOCATE organization_plan;
+ROLLBACK;
+-- Both ALTER and CREATE must reject an invalid organization value.
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'invalid');
+ERROR:  invalid value for option "organization"
+HINT:  Valid values are heap and index.
+CREATE FOREIGN TABLE organization_invalid (id int) SERVER oracle
+   OPTIONS (table 'TYPETEST1', organization 'invalid');
+ERROR:  invalid value for option "organization"
+HINT:  Valid values are heap and index.
