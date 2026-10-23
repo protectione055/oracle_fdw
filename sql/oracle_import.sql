@@ -39,7 +39,7 @@ WHERE t.relname IN ('typetest1', 'ttv', 'mattest2')
   AND NOT a.attisdropped
 ORDER BY t.relname, a.attnum;
 
--- Imported IOTs retain their organization and primary-key column options.
+-- Imported IOTs retain their organization and omit legacy key options.
 ALTER SERVER oracle OPTIONS (ADD isolation_level 'read_committed');
 SELECT oracle_close_connections();
 DO $$
@@ -75,6 +75,13 @@ SELECT attname, attfdwoptions FROM pg_attribute
 WHERE attrelid = 'import.fdw_import_iot'::regclass AND attnum > 0
 ORDER BY attnum;
 SELECT length(id) AS key_length, note FROM import.fdw_import_iot;
+
+-- An imported long-key IOT can be modified using its logical ROWID.
+BEGIN;
+UPDATE import.fdw_import_iot SET id = 'changed', note = note + 1
+   RETURNING id, note;
+DELETE FROM import.fdw_import_iot WHERE id = 'changed' RETURNING id, note;
+ROLLBACK;
 
 DROP FOREIGN TABLE import.fdw_import_iot;
 DO $$

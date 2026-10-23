@@ -53,6 +53,14 @@ EXCEPTION
       NULL;
 END;$$;
 
+DO
+$$BEGIN
+   SELECT oracle_execute('oracle', 'DROP TABLE scott.rowidtest PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+
 SELECT oracle_execute(
           'oracle',
           E'CREATE TABLE scott.typetest1 (\n'
@@ -687,3 +695,176 @@ ALTER FOREIGN TABLE typetest1 OPTIONS (DROP organization);
 EXECUTE organization_plan;
 DEALLOCATE organization_plan;
 ROLLBACK;
+
+/*
+ * Test ROWID-based row identity for UPDATE and DELETE.
+ * A heap table needs no key columns, even when rows are identical.
+ */
+
+SELECT oracle_execute(
+          'oracle',
+          'CREATE TABLE scott.rowidtest (id NUMBER(5), note VARCHAR2(20))'
+       );
+SELECT oracle_execute(
+          'oracle',
+          'INSERT INTO scott.rowidtest SELECT 1, ''same'' FROM DUAL CONNECT BY LEVEL <= 3'
+       );
+CREATE FOREIGN TABLE rowidtest (
+   id     integer NOT NULL,
+   unused integer,
+   note   character varying(20)
+) SERVER oracle OPTIONS (table 'ROWIDTEST');
+-- Keep a dropped attribute throughout the heap DML tests.
+ALTER FOREIGN TABLE rowidtest DROP COLUMN unused;
+
+EXPLAIN (COSTS off)
+UPDATE rowidtest SET note = note || '!' WHERE id = 1;
+-- Each duplicate is updated exactly once, including when id changes.
+UPDATE rowidtest SET note = note || '!' WHERE id = 1;
+SELECT note, count(*) FROM rowidtest GROUP BY note ORDER BY note;
+UPDATE rowidtest SET id = 2 WHERE id = 1 RETURNING id, note;
+
+-- A foreign self-join also supplies a whole-row junk attribute.
+DELETE FROM rowidtest t USING rowidtest s
+WHERE t.id = s.id AND s.note = 'same!';
+SELECT count(*) FROM rowidtest;
+
+INSERT INTO rowidtest VALUES (2, 'a'), (3, 'b');
+-- Expected error: explicit ctid references are unsupported.
+BEGIN;
+UPDATE rowidtest SET note = ctid::text WHERE id = 2;
+ROLLBACK;
+
+-- A query mapping gets ROWID from its Oracle base table. Referencing xmin
+-- on a local join source also exercises a local system column.
+CREATE FOREIGN TABLE rowid_query (id int, note text) SERVER oracle
+   OPTIONS (table '(SELECT ID, NOTE FROM SCOTT.ROWIDTEST)');
+BEGIN;
+CREATE TEMP TABLE rowid_local_key AS SELECT 2 AS id;
+UPDATE rowid_query t SET note = 'mapped' FROM rowid_local_key s
+   WHERE t.id = s.id AND s.xmin IS NOT NULL
+   RETURNING t.id, t.note;
+ROLLBACK;
+DROP FOREIGN TABLE rowid_query;
+
+-- OLD and NEW identify the outer row; the trigger updates a second row
+-- through a nested executor. Both changes must reach their intended rows.
+BEGIN;
+CREATE FUNCTION rowid_nested_update() RETURNS trigger LANGUAGE plpgsql AS
+$$
+BEGIN
+   IF OLD.id = 2 AND NEW.id = 12 THEN
+      UPDATE rowidtest SET id = id + 10 WHERE id = 3;
+   END IF;
+   RETURN NEW;
+END;
+$$;
+CREATE TRIGGER rowid_nested AFTER UPDATE ON rowidtest
+   FOR EACH ROW EXECUTE PROCEDURE rowid_nested_update();
+UPDATE rowidtest SET id = id + 10 WHERE id = 2 RETURNING id, note;
+SELECT id, note FROM rowidtest ORDER BY id;
+ROLLBACK;
+DROP FOREIGN TABLE rowidtest;
+SELECT oracle_execute('oracle', 'DROP TABLE scott.rowidtest PURGE');
+
+/* Test long and short logical ROWIDs with one composite-key IOT. */
+
+-- Use READ COMMITTED for IOT setup and key changes, which can encounter
+-- ORA-08177 under SERIALIZABLE.
+ALTER SERVER oracle OPTIONS (ADD isolation_level 'read_committed');
+SELECT oracle_close_connections();
+DO $$
+BEGIN
+   PERFORM oracle_execute('oracle', $oracle$
+      BEGIN
+         EXECUTE IMMEDIATE 'DROP TABLE SCOTT.FDW_ROWID_IOT PURGE';
+      EXCEPTION
+         WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN
+               RAISE;
+            END IF;
+      END;
+   $oracle$);
+   PERFORM oracle_execute('oracle', $oracle$
+      CREATE TABLE SCOTT.FDW_ROWID_IOT (
+         id NUMBER, keytext VARCHAR2(3000), note NUMBER,
+         PRIMARY KEY (id, keytext)
+      ) ORGANIZATION INDEX
+   $oracle$);
+   PERFORM oracle_execute('oracle', $oracle$
+      INSERT INTO SCOTT.FDW_ROWID_IOT
+      SELECT LEVEL, RPAD('k', 2800, 'k'), LEVEL FROM dual CONNECT BY LEVEL <= 40
+   $oracle$);
+   PERFORM oracle_execute('oracle', $oracle$
+      INSERT INTO SCOTT.FDW_ROWID_IOT VALUES (0, 'short', 0)
+   $oracle$);
+END;
+$$;
+CREATE FOREIGN TABLE rowid_iot (id int, keytext text, note int) SERVER oracle
+   OPTIONS (schema 'SCOTT', table 'FDW_ROWID_IOT', organization 'index');
+
+-- Expected error: a long logical ROWID requires organization "index".
+BEGIN;
+ALTER FOREIGN TABLE rowid_iot OPTIONS (SET organization 'heap');
+UPDATE rowid_iot SET note = note + 1 WHERE id = 1;
+ROLLBACK;
+
+-- Changing a primary key changes its logical ROWID. A subsequent DELETE
+-- must use the new address, for both the short and the long key.
+BEGIN;
+WITH changed AS (
+   UPDATE rowid_iot SET id = id + 100, note = note + 1 WHERE id IN (0, 1)
+   RETURNING id, note
+)
+SELECT * FROM changed ORDER BY id;
+SELECT id, length(keytext) AS key_length, note
+FROM rowid_iot WHERE id IN (100, 101) ORDER BY id;
+WITH removed AS (
+   DELETE FROM rowid_iot WHERE id IN (100, 101)
+   RETURNING id, note
+)
+SELECT * FROM removed ORDER BY id;
+ROLLBACK;
+
+-- Exercise long query-mapped ROWIDs through a merge join and disk sort.
+-- Forty long keys exceed the 64kB sort budget; one short key varies the size.
+ALTER FOREIGN TABLE rowid_iot OPTIONS
+   (DROP schema, SET table '(SELECT ID, KEYTEXT, NOTE FROM SCOTT.FDW_ROWID_IOT)');
+BEGIN;
+SET LOCAL work_mem = '64kB';
+SET LOCAL enable_hashjoin = off;
+SET LOCAL enable_nestloop = off;
+CREATE TEMP TABLE rowid_iot_keys (id text);
+INSERT INTO rowid_iot_keys VALUES ('0'), ('1'), ('40');
+WITH changed AS (
+   UPDATE rowid_iot t SET note = t.note + 100
+   FROM rowid_iot_keys k WHERE t.id::text = k.id
+   RETURNING t.id
+)
+SELECT array_agg(id ORDER BY id) AS changed_ids FROM changed;
+-- All other rows retain note = id.
+SELECT id, note FROM rowid_iot WHERE note <> id ORDER BY id;
+ROLLBACK;
+DROP FOREIGN TABLE rowid_iot;
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_ROWID_IOT PURGE');
+
+-- A single 3200-byte key exercises an IOT ROWID close to the index key
+-- limit of an 8kB Oracle block.
+SELECT oracle_execute('oracle', 'CREATE TABLE SCOTT.FDW_ROWID_IOT (k VARCHAR2(3200) PRIMARY KEY, note NUMBER) ORGANIZATION INDEX OVERFLOW');
+SELECT oracle_execute('oracle', 'INSERT INTO SCOTT.FDW_ROWID_IOT VALUES (RPAD(''k'', 3200, ''k''), 1)');
+CREATE FOREIGN TABLE rowid_iot (k text, note int) SERVER oracle
+   OPTIONS (schema 'SCOTT', table 'FDW_ROWID_IOT', organization 'index');
+CREATE FOREIGN TABLE rowid_iot_length (rowid_length int) SERVER oracle
+   OPTIONS (table '(SELECT LENGTH(ROWID) AS ROWID_LENGTH FROM SCOTT.FDW_ROWID_IOT)');
+SELECT rowid_length > 4000 AS long_rowid FROM rowid_iot_length;
+BEGIN;
+UPDATE rowid_iot SET note = note + 1 RETURNING note;
+ROLLBACK;
+BEGIN;
+DELETE FROM rowid_iot RETURNING note;
+ROLLBACK;
+DROP FOREIGN TABLE rowid_iot_length;
+DROP FOREIGN TABLE rowid_iot;
+SELECT oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_ROWID_IOT PURGE');
+ALTER SERVER oracle OPTIONS (DROP isolation_level);
+SELECT oracle_close_connections();

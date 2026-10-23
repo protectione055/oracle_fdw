@@ -47,13 +47,13 @@ WHERE t.relname IN ('typetest1', 'ttv', 'mattest2')
 ORDER BY t.relname, a.attnum;
   relname  | attname |          atttypid           | attfdwoptions 
 -----------+---------+-----------------------------+---------------
- mattest2  | id      | integer                     | {key=true}
+ mattest2  | id      | integer                     | 
  mattest2  | ts1     | timestamp with time zone    | 
  mattest2  | ts2     | timestamp with time zone    | 
  mattest2  | ts3     | timestamp with time zone    | 
  ttv       | id      | integer                     | 
  ttv       | vc      | character varying           | 
- typetest1 | id      | integer                     | {key=true}
+ typetest1 | id      | integer                     | 
  typetest1 | c       | character                   | 
  typetest1 | nc      | character                   | 
  typetest1 | vc      | character varying           | 
@@ -74,7 +74,7 @@ ORDER BY t.relname, a.attnum;
  typetest1 | iym     | interval                    | 
 (25 rows)
 
--- Imported IOTs retain their organization and primary-key column options.
+-- Imported IOTs retain their organization and omit legacy key options.
 ALTER SERVER oracle OPTIONS (ADD isolation_level 'read_committed');
 SELECT oracle_close_connections();
  oracle_close_connections 
@@ -125,7 +125,7 @@ WHERE attrelid = 'import.fdw_import_iot'::regclass AND attnum > 0
 ORDER BY attnum;
  attname | attfdwoptions 
 ---------+---------------
- id      | {key=true}
+ id      | 
  note    | 
 (2 rows)
 
@@ -135,6 +135,22 @@ SELECT length(id) AS key_length, note FROM import.fdw_import_iot;
        3000 |    1
 (1 row)
 
+-- An imported long-key IOT can be modified using its logical ROWID.
+BEGIN;
+UPDATE import.fdw_import_iot SET id = 'changed', note = note + 1
+   RETURNING id, note;
+   id    | note 
+---------+------
+ changed |    2
+(1 row)
+
+DELETE FROM import.fdw_import_iot WHERE id = 'changed' RETURNING id, note;
+   id    | note 
+---------+------
+ changed |    2
+(1 row)
+
+ROLLBACK;
 DROP FOREIGN TABLE import.fdw_import_iot;
 DO $$
 BEGIN
