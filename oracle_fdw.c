@@ -196,6 +196,7 @@ struct OracleFdwOption
 #define OPT_DBLINK "dblink"
 #define OPT_SCHEMA "schema"
 #define OPT_TABLE "table"
+#define OPT_ORGANIZATION "organization"
 #define OPT_MAX_LONG "max_long"
 #define OPT_READONLY "readonly"
 #define OPT_KEY "key"
@@ -235,6 +236,7 @@ static struct OracleFdwOption valid_options[] = {
 	{OPT_DBLINK, ForeignTableRelationId, false},
 	{OPT_SCHEMA, ForeignTableRelationId, false},
 	{OPT_TABLE, ForeignTableRelationId, true},
+	{OPT_ORGANIZATION, ForeignTableRelationId, false},
 	{OPT_MAX_LONG, ForeignTableRelationId, false},
 	{OPT_READONLY, ForeignTableRelationId, false},
 	{OPT_SAMPLE, ForeignTableRelationId, false},
@@ -410,6 +412,7 @@ static bool hasTrigger(Relation rel, CmdType cmdtype);
 static void buildInsertQuery(StringInfo sql, struct OracleFdwState *fdwState);
 static void buildUpdateQuery(StringInfo sql, struct OracleFdwState *fdwState, List *targetAttrs);
 static void appendReturningClause(StringInfo sql, struct OracleFdwState *fdwState);
+static oraOrganization tableOrganization(Oid relid);
 #ifdef IMPORT_API
 static char *fold_case(char *name, fold_t foldcase, int collation);
 #endif  /* IMPORT_API */
@@ -544,6 +547,14 @@ oracle_fdw_validator(PG_FUNCTION_ARGS)
 				|| strcmp(def->defname, OPT_NCHAR) == 0
 				|| strcmp(def->defname, OPT_SET_TIMEZONE) == 0)
 			(void)getBoolVal(def);
+
+		if (strcmp(def->defname, OPT_ORGANIZATION) == 0
+			&& strcmp(strVal(def->arg), "heap") != 0
+			&& strcmp(strVal(def->arg), "index") != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
+					 errmsg("invalid value for option \"%s\"", def->defname),
+					 errhint("Valid values are heap and index.")));
 
 		/* check valid values for "dblink" */
 		if (strcmp(def->defname, OPT_DBLINK) == 0)
@@ -2871,6 +2882,7 @@ getColumnData(Oid foreigntableid, struct oraTable *oraTable)
 
 	/* number of PostgreSQL columns */
 	oraTable->npgcols = tupdesc->natts;
+	oraTable->organization = tableOrganization(foreigntableid);
 
 	/* loop through foreign table columns */
 	index = 0;
@@ -5549,6 +5561,8 @@ List
 	result = lappend(result, serializeInt(fdwState->oraTable->ncols));
 	/* number of columns in PostgreSQL table */
 	result = lappend(result, serializeInt(fdwState->oraTable->npgcols));
+	/* table organization */
+	result = lappend(result, serializeInt(fdwState->oraTable->organization));
 	/* column data */
 	for (i=0; i<fdwState->oraTable->ncols; ++i)
 	{
@@ -5678,6 +5692,8 @@ struct OracleFdwState
 	state->oraTable->ncols = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
 	cell = list_next(list, cell);
 	state->oraTable->npgcols = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
+	cell = list_next(list, cell);
+	state->oraTable->organization = (oraOrganization)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
 	cell = list_next(list, cell);
 	state->oraTable->cols = (struct oraColumn **)palloc(sizeof(struct oraColumn *) * state->oraTable->ncols);
 
@@ -5954,6 +5970,7 @@ struct OracleFdwState
 	copy->oraTable = (struct oraTable *)palloc(sizeof(struct oraTable));
 	copy->oraTable->name = pstrdup(orig->oraTable->name);
 	copy->oraTable->pgname = pstrdup(orig->oraTable->pgname);
+	copy->oraTable->organization = orig->oraTable->organization;
 	copy->oraTable->ncols = orig->oraTable->ncols;
 	copy->oraTable->npgcols = orig->oraTable->npgcols;
 	copy->oraTable->cols = (struct oraColumn **)palloc(sizeof(struct oraColumn *) * orig->oraTable->ncols);
@@ -6274,6 +6291,29 @@ hasTrigger(Relation rel, CmdType cmdtype)
 			&& ((cmdtype == CMD_UPDATE && rel->trigdesc->trig_update_after_row)
 				|| (cmdtype == CMD_INSERT && rel->trigdesc->trig_insert_after_row)
 				|| (cmdtype == CMD_DELETE && rel->trigdesc->trig_delete_after_row));
+}
+
+/*
+ * tableOrganization
+ * 		Return the table organization specified by the foreign table options.
+ */
+static oraOrganization
+tableOrganization(Oid relid)
+{
+	ForeignTable *table;
+	ListCell *cell;
+
+	table = GetForeignTable(relid);
+	foreach(cell, table->options)
+	{
+		DefElem *def;
+
+		def = (DefElem *)lfirst(cell);
+		if (strcmp(def->defname, OPT_ORGANIZATION) == 0)
+			return strcmp(strVal(def->arg), "index") == 0
+				? ORA_ORGANIZATION_INDEX : ORA_ORGANIZATION_HEAP;
+	}
+	return ORA_ORGANIZATION_HEAP;
 }
 
 void

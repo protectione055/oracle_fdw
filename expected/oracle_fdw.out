@@ -1008,3 +1008,44 @@ SELECT * FROM b;
 (2 rows)
 
 ROLLBACK;
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'invalid');
+ERROR:  invalid value for option "organization"
+HINT:  Valid values are heap and index.
+CREATE FOREIGN TABLE organization_invalid (id int) SERVER oracle
+   OPTIONS (table 'TYPETEST1', organization 'invalid');
+ERROR:  invalid value for option "organization"
+HINT:  Valid values are heap and index.
+-- A cached UPDATE must still locate the same row after each option change.
+BEGIN;
+PREPARE organization_plan AS
+   UPDATE typetest1 SET c = 'org' WHERE id = 1 RETURNING id;
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'index');
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (SET organization 'heap');
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (DROP organization);
+EXECUTE organization_plan;
+ id 
+----
+  1
+(1 row)
+
+DEALLOCATE organization_plan;
+ROLLBACK;

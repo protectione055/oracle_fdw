@@ -669,3 +669,21 @@ UNION ALL
 SELECT * FROM b;
 
 ROLLBACK;
+
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'invalid');
+CREATE FOREIGN TABLE organization_invalid (id int) SERVER oracle
+   OPTIONS (table 'TYPETEST1', organization 'invalid');
+
+-- A cached UPDATE must still locate the same row after each option change.
+BEGIN;
+PREPARE organization_plan AS
+   UPDATE typetest1 SET c = 'org' WHERE id = 1 RETURNING id;
+EXECUTE organization_plan;
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'index');
+EXECUTE organization_plan;
+ALTER FOREIGN TABLE typetest1 OPTIONS (SET organization 'heap');
+EXECUTE organization_plan;
+ALTER FOREIGN TABLE typetest1 OPTIONS (DROP organization);
+EXECUTE organization_plan;
+DEALLOCATE organization_plan;
+ROLLBACK;
