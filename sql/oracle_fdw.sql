@@ -634,3 +634,21 @@ SELECT * FROM typetest2 ORDER BY id;
 COMMIT;
 -- we need to re-establish the connection after changing "timezone"
 SELECT oracle_close_connections();
+
+-- Exercise cached scans with heap, index, and default organization.
+-- ROLLBACK restores the existing table definition.
+BEGIN;
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'heap');
+PREPARE organization_plan AS SELECT id FROM typetest1 WHERE id = 1;
+EXECUTE organization_plan;
+ALTER FOREIGN TABLE typetest1 OPTIONS (SET organization 'index');
+EXECUTE organization_plan;
+ALTER FOREIGN TABLE typetest1 OPTIONS (DROP organization);
+EXECUTE organization_plan;
+DEALLOCATE organization_plan;
+ROLLBACK;
+
+-- Both ALTER and CREATE must reject an invalid organization value.
+ALTER FOREIGN TABLE typetest1 OPTIONS (ADD organization 'invalid');
+CREATE FOREIGN TABLE organization_invalid (id int) SERVER oracle
+   OPTIONS (table 'TYPETEST1', organization 'invalid');

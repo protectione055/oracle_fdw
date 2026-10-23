@@ -274,6 +274,11 @@ Foreign table options
   you will receive the error message `ORA-01406: fetched column value was
   truncated`.
 
+- **organization** (optional, defaults to "heap")
+
+  The Oracle table organization: `heap` for ordinary tables and `index`
+  for index-organized tables. The default is `heap`.
+
 - **readonly** (optional, defaults to "false")
 
   INSERT, UPDATE and DELETE is only allowed on tables where this option is
