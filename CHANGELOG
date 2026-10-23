@@ -10,8 +10,15 @@ Version 2.10.0
   - Add a CI workflow that automatically tests new commits against PostgreSQL
     v18 and both Oracle server 21/client 19 and Oracle server 23/client 23.
     Patch by Ziming Zhang.
-  - Add the "organization" foreign table option to distinguish heap tables
-    from index-organized tables. IMPORT FOREIGN SCHEMA sets it automatically.
+  - Use Oracle's ROWID to identify rows for UPDATE and DELETE statements.
+    This replaces the "key" column option: modification statements no
+    longer require a primary key, and tables without a primary key (or
+    with duplicate rows) can be modified correctly.  The "key" column
+    option is still accepted and is ignored.
+  - Set the new "organization" table option to "index" for manually defined
+    index-organized tables. IMPORT FOREIGN SCHEMA sets it automatically.
+  - UPDATE and DELETE require PostgreSQL 9.5 or later. PostgreSQL 9.3 and 9.4
+    continue to support reads and INSERT.
 
 Version 2.9.0, released 2026-06-08
 
