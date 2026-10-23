@@ -53,6 +53,14 @@ EXCEPTION
       NULL;
 END;$$;
 
+DO
+$$BEGIN
+   SELECT oracle_execute('oracle', 'DROP TABLE scott.rowidtest PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+
 SELECT oracle_execute(
           'oracle',
           E'CREATE TABLE scott.typetest1 (\n'
@@ -669,3 +677,38 @@ UNION ALL
 SELECT * FROM b;
 
 ROLLBACK;
+
+/*
+ * Test ROWID-based row identity for UPDATE and DELETE.
+ * A heap table needs no key columns, even when rows are identical.
+ */
+
+SELECT oracle_execute(
+          'oracle',
+          'CREATE TABLE scott.rowidtest (id NUMBER(5), note VARCHAR2(20))'
+       );
+SELECT oracle_execute(
+          'oracle',
+          'INSERT INTO scott.rowidtest SELECT 1, ''same'' FROM DUAL CONNECT BY LEVEL <= 3'
+       );
+CREATE FOREIGN TABLE rowidtest (
+   id     integer NOT NULL,
+   unused integer,
+   note   character varying(20)
+) SERVER oracle OPTIONS (table 'ROWIDTEST');
+-- Keep a dropped attribute throughout the heap DML tests.
+ALTER FOREIGN TABLE rowidtest DROP COLUMN unused;
+
+EXPLAIN (COSTS off)
+UPDATE rowidtest SET note = note || '!' WHERE id = 1;
+-- Each duplicate is updated exactly once, including when id changes.
+UPDATE rowidtest SET note = note || '!' WHERE id = 1;
+SELECT note, count(*) FROM rowidtest GROUP BY note ORDER BY note;
+UPDATE rowidtest SET id = 2 WHERE id = 1 RETURNING id, note;
+
+-- Expected error: explicit ctid references are unsupported.
+UPDATE rowidtest SET note = ctid::text WHERE id = 2;
+
+DELETE FROM rowidtest WHERE id = 2 RETURNING id, note;
+DROP FOREIGN TABLE rowidtest;
+SELECT oracle_execute('oracle', 'DROP TABLE scott.rowidtest PURGE');
