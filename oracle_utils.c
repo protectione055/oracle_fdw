@@ -2510,24 +2510,25 @@ void *oracleGetGeometryType(oracleSession *session)
  * 		Get the next element in the ordered list of tables and their columns for "schema".
  * 		Returns 0 if there are no more columns, -1 if the remote schema does not exist, else 1.
  */
-int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, char *limit_to, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key, int skip_tables, int skip_views, int skip_matviews)
+int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, char *limit_to, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key, oraOrganization *organization, int skip_tables, int skip_views, int skip_matviews)
 {
 	/* the static variables will contain data returned to the caller */
 	static char s_tabname[129], s_colname[129];
-	char typename[129] = { '\0' }, typeowner[129] = { '\0' }, isnull[2] = { '\0' };
+	char typename[129] = { '\0' }, typeowner[129] = { '\0' }, isnull[2] = { '\0' }, iot_type[13] = { '\0' };
 	char object_types[40] = "";
 	int count = 0;
 	const char * const schema_query = "SELECT COUNT(*) FROM all_users WHERE username = :nsp";
 	const char * const column_query_template =
 		"SELECT col.table_name, col.column_name, col.data_type, col.data_type_owner,\n"
 		"       col.char_length, col.data_precision, col.data_scale, col.nullable,\n"
-		"       CASE WHEN primkey_col.position IS NOT NULL THEN 1 ELSE 0 END AS primary_key\n"
+		"       CASE WHEN primkey_col.position IS NOT NULL THEN 1 ELSE 0 END AS primary_key, tab.iot_type\n"
 		"FROM all_tab_columns%s col,\n"
 		"     (SELECT con.table_name, cons_col.column_name, cons_col.position\n"
 		"      FROM all_constraints%s con, all_cons_columns%s cons_col\n"
 		"      WHERE con.owner = cons_col.owner AND con.table_name = cons_col.table_name\n"
 		"        AND con.constraint_name = cons_col.constraint_name\n"
 		"        AND con.constraint_type = 'P' AND con.owner = :nsp) primkey_col,\n"
+		"     all_tables%s tab,\n"
 		"     (SELECT owner, object_name,\n"
 		"             /* materialized views show up as TABLE and as MATERIALIZED VIEW */\n"
 		"             min(object_type) AS object_type\n"
@@ -2537,6 +2538,7 @@ int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, ch
 		"WHERE col.table_name = primkey_col.table_name(+)\n"
 		"  AND col.column_name = primkey_col.column_name(+)\n"
 		"  AND col.owner = :nsp\n"
+		"  AND col.owner = tab.owner(+) AND col.table_name = tab.table_name(+)\n"
 		"  AND col.table_name = obj.object_name AND obj.owner = :nsp\n"
 		"  AND obj.object_type IN ('silly'%s)\n"
 		"%s%s%sORDER BY col.table_name, col.column_id";
@@ -2544,12 +2546,13 @@ int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, ch
 	OCIBind *bndhp = NULL;
 	sb2 ind = 0, ind_tabname, ind_colname, ind_typename, ind_typeowner = OCI_IND_NOTNULL,
 		ind_charlen = OCI_IND_NOTNULL, ind_precision = OCI_IND_NOTNULL, ind_scale = OCI_IND_NOTNULL,
-		ind_isnull, ind_key;
+		ind_isnull, ind_key, ind_iot_type;
 	OCIDefine *defnhp_tabname = NULL, *defnhp_colname = NULL, *defnhp_typename = NULL,
 		*defnhp_typeowner = NULL, *defnhp_charlen = NULL, *defnhp_precision = NULL,
-		*defnhp_scale = NULL, *defnhp_isnull = NULL, *defnhp_key = NULL, *defnhp_count = NULL;
+		*defnhp_scale = NULL, *defnhp_isnull = NULL, *defnhp_key = NULL, *defnhp_count = NULL,
+		*defnhp_iot_type = NULL;
 	ub2 len_tabname, len_colname, len_typename, len_typeowner,
-		len_charlen, len_precision, len_scale, len_isnull, len_key, len_count;
+		len_charlen, len_precision, len_scale, len_isnull, len_key, len_count, len_iot_type;
 	ub4 prefetch_rows = 50;
 	sword result;
 
@@ -2643,12 +2646,12 @@ int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, ch
 			strcat(object_types, ", 'MATERIALIZED VIEW'");
 
 		/* construct the query by appending the dblink to the catalog tables */
-		column_query = oracleAlloc(1 + strlen(column_query_template) - 10
-								   + 4 * strlen(table_suffix)
+		column_query = oracleAlloc(1 + strlen(column_query_template) - 12
+								   + 5 * strlen(table_suffix)
 								   + strlen(object_types)
 								   + (limit_to ? 34 + strlen(limit_to) : 0));
 		sprintf(column_query, column_query_template,
-				table_suffix, table_suffix, table_suffix, table_suffix,
+				table_suffix, table_suffix, table_suffix, table_suffix, table_suffix,
 				object_types,
 				(limit_to ? "  AND upper(col.table_name) IN (" : ""),
 				(limit_to ? limit_to : ""),
@@ -2806,6 +2809,17 @@ int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, ch
 				oraMessage);
 		}
 
+		if (checkerr(
+			OCIDefineByPos(session->stmthp, &defnhp_iot_type, session->envp->errhp, (ub4)10,
+				(dvoid *)iot_type, (sb4)sizeof(iot_type), SQLT_STR, (dvoid *)&ind_iot_type,
+				&len_iot_type, NULL, OCI_DEFAULT),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error importing foreign schema: OCIDefineByPos failed to define result for table organization",
+				oraMessage);
+		}
+
 		/* execute the query and get the first result row */
 		result = checkerr(
 			OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)1, (ub4)0,
@@ -2843,6 +2857,8 @@ int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, ch
 	{
 		/* set nullable to 1 if isnull is 'Y', else 0 */
 		*nullable = (isnull[0] == 'Y');
+		*organization = ind_iot_type == OCI_IND_NOTNULL && strcmp(iot_type, "IOT") == 0
+			? ORA_ORGANIZATION_INDEX : ORA_ORGANIZATION_HEAP;
 
 		/* figure out correct data type */
 		if (strncmp(typename, "VARCHAR", 7) == 0)

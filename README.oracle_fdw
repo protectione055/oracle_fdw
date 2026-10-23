@@ -278,6 +278,7 @@ Foreign table options
 
   The Oracle table organization: `heap` for ordinary tables and `index`
   for index-organized tables. The default is `heap`.
+  IMPORT FOREIGN SCHEMA sets `organization 'index'` for IOT base tables.
 
 - **readonly** (optional, defaults to "false")
 
