@@ -2273,6 +2273,8 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 		 *sample_percent = NULL, *prefetch = NULL, *lob_prefetch = NULL,
 		 *limit_to = NULL;
 	oraType type;
+	oraOrganization organization = ORA_ORGANIZATION_HEAP;
+	oraOrganization old_organization = ORA_ORGANIZATION_HEAP;
 	int charlen, typeprec, typescale, nullable, key, rc;
 	List *options, *result = NIL;
 	ListCell *cell;
@@ -2515,6 +2517,7 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			&typescale,
 			&nullable,
 			&key,
+			&organization,
 			(int)skip_tables,
 			(int)skip_views,
 			(int)skip_matviews
@@ -2549,6 +2552,8 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 				appendStringInfo(&buf, ", prefetch '%s'", prefetch);
 			if (lob_prefetch)
 				appendStringInfo(&buf, ", lob_prefetch '%s'", lob_prefetch);
+			if (old_organization == ORA_ORGANIZATION_INDEX)
+				appendStringInfo(&buf, ", organization 'index'");
 			if (set_timezone)
 				appendStringInfo(&buf, ", set_timezone 'true'");
 			appendStringInfo(&buf, ")");
@@ -2566,6 +2571,7 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 			firstcol = true;
 			strcpy(oldtabname, tabname);
+			old_organization = organization;
 		}
 
 		if (rc == 1)
