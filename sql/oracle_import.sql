@@ -38,3 +38,47 @@ WHERE t.relname IN ('typetest1', 'ttv', 'mattest2')
   AND t.relnamespace = 'import'::regnamespace
   AND NOT a.attisdropped
 ORDER BY t.relname, a.attnum;
+
+-- Imported IOTs retain their organization and primary-key column options.
+ALTER SERVER oracle OPTIONS (ADD isolation_level 'read_committed');
+SELECT oracle_close_connections();
+DO $$
+BEGIN
+   PERFORM oracle_execute('oracle', $oracle$
+      BEGIN
+         EXECUTE IMMEDIATE 'DROP TABLE SCOTT.FDW_IMPORT_IOT PURGE';
+      EXCEPTION
+         WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN
+               RAISE;
+            END IF;
+      END;
+   $oracle$);
+   PERFORM oracle_execute('oracle', $oracle$
+      CREATE TABLE SCOTT.FDW_IMPORT_IOT (
+         id VARCHAR2(3000) PRIMARY KEY, note NUMBER
+      ) ORGANIZATION INDEX
+   $oracle$);
+   PERFORM oracle_execute('oracle', $oracle$
+      INSERT INTO SCOTT.FDW_IMPORT_IOT VALUES (rpad('a', 3000, 'a'), 1)
+   $oracle$);
+END;
+$$;
+ALTER SERVER oracle OPTIONS (DROP isolation_level);
+SELECT oracle_close_connections();
+
+IMPORT FOREIGN SCHEMA "SCOTT" LIMIT TO (fdw_import_iot)
+   FROM SERVER oracle INTO import OPTIONS (case 'lower');
+SELECT ftoptions FROM pg_foreign_table
+WHERE ftrelid = 'import.fdw_import_iot'::regclass;
+SELECT attname, attfdwoptions FROM pg_attribute
+WHERE attrelid = 'import.fdw_import_iot'::regclass AND attnum > 0
+ORDER BY attnum;
+SELECT length(id) AS key_length, note FROM import.fdw_import_iot;
+
+DROP FOREIGN TABLE import.fdw_import_iot;
+DO $$
+BEGIN
+   PERFORM oracle_execute('oracle', 'DROP TABLE SCOTT.FDW_IMPORT_IOT PURGE');
+END;
+$$;
