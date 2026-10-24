@@ -844,6 +844,39 @@ The regression tests are run as follows:
 
     $ make installcheck
 
+Regression testing requires Python 3 (override `REGRESS_PYTHON` if needed).
+Tests stay in their functional SQL suites.  Expected output is stored in
+`expected/*.out` or, for version-dependent output, `expected/*.out.in`.
+Template lines are compared exactly, including whitespace, with these explicit
+exceptions:
+
+* `@regex@ PATTERN` matches one complete output line using a Python regular
+  expression.  For example, `@regex@    InitPlan (expr_1|1)` accepts the two
+  known names for this InitPlan, including its three leading spaces.
+* `@oneof@`, `@or@`, and `@end@` delimit alternative output sequences:
+
+      @oneof@
+      first output
+      @or@
+      alternative output
+      with an additional line
+      @end@
+
+  Tags occupy a whole line starting in the first column.  Each block has at
+  least two alternatives; an alternative can be empty or contain `@regex@`
+  lines.  Blocks cannot be nested.  Include the complete differing plan
+  structure and its row count in an alternative to check them together.
+
+`make installcheck` prepares `regress-expected/expected/` and uses
+`test/regress.py` as the pg_regress psql launcher.  The launcher preserves the
+actual output in `results/`, validates it against the template, and writes
+the selected expected output for pg_regress to compare.  On a mismatch it
+keeps the literal expectations and unmatched regex markers in the generated
+file for the usual `regression.diffs`, and records the template and output
+line numbers in `regress-expected/expected/TEST.match`.  A mismatch fails the
+test even if its diagnostic rendering happens to equal the actual output.
+Generated expectations are rebuilt for each run and removed by `make clean`.
+
 The regression tests are kept up to date with the latest development version of
 PostgreSQL.  If you run them with older PostgreSQL versions, you can expect
 minor differences, like changed error messages or a different format of the

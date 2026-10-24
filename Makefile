@@ -4,6 +4,12 @@ EXTENSION = oracle_fdw
 DATA = oracle_fdw--1.2.sql oracle_fdw--1.0--1.1.sql oracle_fdw--1.1--1.2.sql
 DOCS = README.oracle_fdw
 REGRESS = oracle_fdw oracle_gis oracle_import oracle_join
+REGRESS_PYTHON ?= python3
+REGRESS_EXPECTED = $(CURDIR)/regress-expected
+REGRESS_PREP += prepare-regress-expected
+REGRESS_OPTS += --expecteddir="$(REGRESS_EXPECTED)" \
+ --launcher='$(REGRESS_PYTHON) "$(abspath $(srcdir))/test/regress.py" launch "$(abspath $(srcdir))/expected" "$(REGRESS_EXPECTED)/expected"'
+EXTRA_CLEAN += $(REGRESS_EXPECTED)
 
 # try to find Instant Client installations installed in standard paths
 FIND_INCLUDE := $(wildcard /usr/include/oracle/*/client64 /usr/include/oracle/*/client)
@@ -40,3 +46,7 @@ else
 ORACLE_SHLIB=clntsh
 endif
 endif
+
+.PHONY: prepare-regress-expected
+prepare-regress-expected:
+	$(REGRESS_PYTHON) "$(abspath $(srcdir))/test/regress.py" prepare "$(abspath $(srcdir))/expected" "$(REGRESS_EXPECTED)/expected"

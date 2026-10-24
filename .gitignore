@@ -36,3 +36,5 @@ msvc/*.suo
 msvc/*.vcxproj.filters
 msvc/Win32
 msvc/x64
+
+/regress-expected/
