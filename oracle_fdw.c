@@ -8,6 +8,7 @@
 #include "postgres.h"
 
 #include "fmgr.h"
+#include "funcapi.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
@@ -257,6 +258,15 @@ static struct OracleFdwOption valid_options[] = {
 
 static regproc *output_funcs;
 
+/* Execution-time mapping from converted table columns to a custom scan slot. */
+struct OracleScanSlotMap {
+	int ncols;                    /* number of table columns copied */
+	int *src;                     /* indexes in scan_values and scan_nulls */
+	int *dst;                     /* corresponding scan slot indexes */
+	List *tableoid;               /* scan slot indexes for tableoid */
+	List *wholerow;               /* scan slot indexes for whole-row values */
+};
+
 /*
  * FDW-specific information for RelOptInfo.fdw_private and ForeignScanState.fdw_state.
  * The same structure is used to hold information for query planning and execution.
@@ -290,6 +300,11 @@ struct OracleFdwState {
 	char *where_clause;            /* deparsed where clause */
 	int nconvertcols;              /* number of positions in the conversion arrays */
 	int *convertcols;              /* Oracle column indexes, or -1 for unmapped positions */
+	struct OracleScanSlotMap *scan_slot_map; /* custom base scan layout, valid during execution */
+	Datum *scan_values;            /* converted table columns */
+	bool *scan_nulls;
+
+	Relation rel;                  /* scan relation, valid during execution */
 
 	/*
 	 * Restriction clauses, divided into safe and unsafe to pushdown subsets.
@@ -1288,6 +1303,41 @@ oracleBeginForeignScan(ForeignScanState *node, int eflags)
 	fdw_state = deserializePlanData(fdw_private);
 	node->fdw_state = (void *)fdw_state;
 
+	/* Map converted table columns to the custom base scan layout. */
+	fdw_state->rel = node->ss.ss_currentRelation;
+#if PG_VERSION_NUM >= 90500
+	if (fdw_state->rel != NULL && fsplan->fdw_scan_tlist != NIL)
+	{
+		struct OracleScanSlotMap *map = palloc0(sizeof(*map));
+		int nattrs = list_length(fsplan->fdw_scan_tlist);
+		int k = 0;
+
+		map->src = palloc(sizeof(int) * nattrs);
+		map->dst = palloc(sizeof(int) * nattrs);
+		foreach(cell, fsplan->fdw_scan_tlist)
+		{
+			TargetEntry *tle = lfirst_node(TargetEntry, cell);
+			Var *var = (Var *)tle->expr;
+
+			Assert(IsA(var, Var));
+			if (var->varattno == TableOidAttributeNumber)
+				map->tableoid = lappend_int(map->tableoid, k);
+			else if (var->varattno == InvalidAttrNumber)
+				map->wholerow = lappend_int(map->wholerow, k);
+			else
+			{
+				Assert(var->varattno > 0);
+				map->src[map->ncols] = var->varattno - 1;
+				map->dst[map->ncols++] = k;
+			}
+			++k;
+		}
+		fdw_state->scan_slot_map = map;
+		fdw_state->scan_values = palloc(sizeof(Datum) * fdw_state->nconvertcols);
+		fdw_state->scan_nulls = palloc(sizeof(bool) * fdw_state->nconvertcols);
+	}
+#endif
+
 	/* create an ExprState tree for the parameter expressions */
 #if PG_VERSION_NUM < 100000
 	exec_exprs = (List *)ExecInitExpr((Expr *)fsplan->fdw_exprs, (PlanState *)node);
@@ -1413,10 +1463,43 @@ oracleIterateForeignScan(ForeignScanState *node)
 		/* increase row count */
 		++fdw_state->rowcount;
 
-		/* convert result to arrays of values and null indicators */
-		convertTuple(fdw_state, index, slot->tts_values, slot->tts_isnull);
+		if (fdw_state->scan_slot_map != NULL)
+		{
+			struct OracleScanSlotMap *map = fdw_state->scan_slot_map;
+			ListCell *lc;
+			int k;
+			Datum *values = fdw_state->scan_values;
+			bool *nulls = fdw_state->scan_nulls;
 
-		/* store the virtual tuple */
+			convertTuple(fdw_state, index, values, nulls);
+
+			for (k = 0; k < map->ncols; ++k)
+			{
+				slot->tts_values[map->dst[k]] = values[map->src[k]];
+				slot->tts_isnull[map->dst[k]] = nulls[map->src[k]];
+			}
+			foreach(lc, map->tableoid)
+			{
+				k = lfirst_int(lc);
+				slot->tts_values[k] = ObjectIdGetDatum(RelationGetRelid(fdw_state->rel));
+				slot->tts_isnull[k] = false;
+			}
+			if (map->wholerow != NIL)
+			{
+				HeapTuple tuple = heap_form_tuple(RelationGetDescr(fdw_state->rel), values, nulls);
+				Datum datum = HeapTupleGetDatum(tuple);
+
+				foreach(lc, map->wholerow)
+				{
+					k = lfirst_int(lc);
+					slot->tts_values[k] = datum;
+					slot->tts_isnull[k] = false;
+				}
+			}
+		}
+		else
+			convertTuple(fdw_state, index, slot->tts_values, slot->tts_isnull);
+
 		ExecStoreVirtualTuple(slot);
 	}
 	else
@@ -5765,6 +5848,10 @@ struct OracleFdwState
 	}
 
 	initConversionMap(state);
+	state->rel = NULL;
+	state->scan_slot_map = NULL;
+	state->scan_values = NULL;
+	state->scan_nulls = NULL;
 
 	/* length of parameter list */
 	len = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
@@ -6038,8 +6125,12 @@ struct OracleFdwState
 	copy->order_clause = NULL;
 	copy->prefetch = orig->prefetch;
 	copy->lob_prefetch = orig->lob_prefetch;
+	copy->rel = NULL;
 	copy->nconvertcols = 0;
 	copy->convertcols = NULL;
+	copy->scan_slot_map = NULL;
+	copy->scan_values = NULL;
+	copy->scan_nulls = NULL;
 
 	return copy;
 }
