@@ -20,6 +20,11 @@
 results
 regression.out
 regression.diffs
+regress-tmp
+
+# Python bytecode
+__pycache__/
+*.pyc
 
 # dependency tracking
 .deps

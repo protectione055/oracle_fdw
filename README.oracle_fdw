@@ -840,9 +840,32 @@ If the Oracle server is on the same machine, set the environment variables
 ORACLE_SID and ORACLE_HOME appropriately, for a remote server set the
 environment variable TWO_TASK (or LOCAL on Windows) to the connect string.
 
-The regression tests are run as follows:
+Regression testing requires Python 3.  Pass labels for the test environment:
 
-    $ make installcheck
+    $ make installcheck REGRESS_LABELS="pg18 oracle23"
+
+Here, `pg18` selects PostgreSQL 18 output and `oracle23` selects output for
+the Oracle server 23/client 23 configuration.
+
+Expected files in `expected/` can contain labeled blocks:
+
+    @@ BEGIN @@
+    @@ DEFAULT @@
+       InitPlan expr_1
+    @@ WHEN pg18 @@
+       InitPlan 1
+    @@ END @@
+
+Each block requires one default branch.  A WHEN branch matches any of its
+listed labels; otherwise the default is used.  Multiple matching branches
+are an error.  Tags occupy a whole line starting in the first column, and
+blocks cannot be nested.
+
+Before running pg_regress, make expands the templates into
+`regress-tmp/expected/`.  Results and differences are also saved under
+`regress-tmp/`, which `make clean` removes.  Use `REGRESS_OUTPUTDIR=DIR`
+to save test output elsewhere; on PostgreSQL 15 and earlier, that directory
+must not contain an `expected/` subdirectory.
 
 The regression tests are kept up to date with the latest development version of
 PostgreSQL.  If you run them with older PostgreSQL versions, you can expect

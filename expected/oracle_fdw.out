@@ -241,7 +241,13 @@ SELECT oracle_close_connections();
 
 DELETE FROM typetest1;
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
+@@ BEGIN @@
+@@ DEFAULT @@
 DETAIL:  ORA-01456: may not perform insert/delete/update operation inside a READ ONLY transaction
+@@ WHEN oracle23 @@
+DETAIL:  ORA-01456: may not perform insert, delete, update operation inside a READ ONLY transaction
+Help: https://docs.oracle.com/error-help/db/ora-01456/
+@@ END @@
 -- use the default SERIALIZABLE isolation level from now on
 ALTER SERVER oracle OPTIONS (DROP isolation_level);
 SELECT oracle_close_connections();
@@ -368,7 +374,14 @@ SAVEPOINT one;
 -- will cause an error
 INSERT INTO shorty (id, c) VALUES (1, 'c');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
+@@ BEGIN @@
+@@ DEFAULT @@
 DETAIL:  ORA-00001: unique constraint (SCOTT.TYPETEST1_PKEY) violated
+@@ WHEN oracle23 @@
+DETAIL:  ORA-00001: unique constraint (SCOTT.TYPETEST1_PKEY) violated on table SCOTT.TYPETEST1 columns (ID)
+ORA-03301: (ORA-00001 details) row with column values (ID:1) already exists
+Help: https://docs.oracle.com/error-help/db/ora-00001/
+@@ END @@
 ROLLBACK TO one;
 INSERT INTO shorty (id, c) VALUES (2, 'c');
 ROLLBACK TO one;
@@ -424,7 +437,12 @@ EXPLAIN (COSTS off) SELECT id FROM typetest1 WHERE vc = ANY (ARRAY['short', (SEL
 --------------------------------------------------------------------------------------------------------------------------------------------------------
  Foreign Scan on typetest1
    Oracle query: SELECT /*e4d3d23eb05ef98f*/ r1."ID", r1."VC" FROM "TYPETEST1" r1 WHERE (r1."VC" IN ('short', :p00001)) ORDER BY r1."ID" ASC NULLS LAST
+@@ BEGIN @@
+@@ DEFAULT @@
    InitPlan expr_1
+@@ WHEN pg18 @@
+   InitPlan 1
+@@ END @@
      ->  Result
 (4 rows)
 
