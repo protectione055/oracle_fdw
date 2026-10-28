@@ -1255,7 +1255,7 @@ CREATE FOREIGN TABLE rowid_iot (id int, keytext text, note int) SERVER oracle
 -- Expected error: a long logical ROWID requires organization "index".
 BEGIN;
 ALTER FOREIGN TABLE rowid_iot OPTIONS (SET organization 'heap');
-UPDATE rowid_iot SET note = note + 1 WHERE id = 1;
+UPDATE rowid_iot SET note = note + 1 WHERE id = 1 RETURNING note;
 ERROR:  logical Oracle row identity requires organization "index"
 HINT:  Set the foreign table option "organization" to "index".
 ROLLBACK;

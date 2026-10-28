@@ -7,6 +7,10 @@
  */
 #include "postgres.h"
 
+#if PG_VERSION_NUM < 90600
+#error "oracle_fdw requires PostgreSQL 9.6 or later"
+#endif
+
 #include "fmgr.h"
 #include "funcapi.h"
 #include "access/htup_details.h"
@@ -289,6 +293,8 @@ struct OracleFdwState {
 	unsigned int prefetch;         /* number of rows to prefetch */
 	unsigned int lob_prefetch;     /* number of LOB bytes to prefetch */
 	unsigned long rowcount;        /* rows already read from Oracle */
+	bool direct_done;              /* direct DML has executed, including zero rows */
+	bool set_processed;            /* direct DML contributes to command tag */
 	int columnindex;               /* currently processed column for error context */
 	MemoryContext temp_cxt;        /* short-lived memory for data modification */
 	char *order_clause;            /* for ORDER BY pushdown */
@@ -369,6 +375,10 @@ static void oracleAddForeignUpdateTargets(Query *parsetree, RangeTblEntry *targe
 #else
 static void oracleAddForeignUpdateTargets(PlannerInfo *root, Index rtindex, RangeTblEntry *target_rte, Relation target_relation);
 #endif
+static bool oraclePlanDirectModify(PlannerInfo *root, ModifyTable *plan, Index resultRelation, int subplan_index);
+static void oracleBeginDirectModify(ForeignScanState *node, int eflags);
+static TupleTableSlot *oracleIterateDirectModify(ForeignScanState *node);
+static void oracleExplainDirectModify(ForeignScanState *node, ExplainState *es);
 static List *oraclePlanForeignModify(PlannerInfo *root, ModifyTable *plan, Index resultRelation, int subplan_index);
 static void oracleBeginForeignModify(ModifyTableState *mtstate, ResultRelInfo *rinfo, List *fdw_private, int subplan_index, int eflags);
 #if PG_VERSION_NUM >= 110000
@@ -461,6 +471,16 @@ struct pg_itm
 static void interval2itm(Interval span, struct pg_itm *itm);
 #endif  /* PG_VERSION_NUM */
 
+/*
+ * This macro is used by deparseExpr to identify PostgreSQL
+ * types that can be translated to Oracle SQL.
+ */
+#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID || (x) == BPCHAROID \
+			|| (x) == VARCHAROID || (x) == NAMEOID || (x) == INT8OID || (x) == INT2OID \
+			|| (x) == INT4OID || (x) == OIDOID || (x) == FLOAT4OID || (x) == FLOAT8OID \
+			|| (x) == NUMERICOID || (x) == DATEOID || (x) == TIMESTAMPOID || (x) == TIMESTAMPTZOID \
+			|| (x) == INTERVALOID || (x) == UUIDOID)
+
 #define REL_ALIAS_PREFIX    "r"
 /* Handy macro to add relation name qualification */
 #define ADD_REL_QUALIFIER(buf, varno)   \
@@ -488,6 +508,11 @@ oracle_fdw_handler(PG_FUNCTION_ARGS)
 	fdwroutine->ReScanForeignScan = oracleReScanForeignScan;
 	fdwroutine->EndForeignScan = oracleEndForeignScan;
 	fdwroutine->AddForeignUpdateTargets = oracleAddForeignUpdateTargets;
+	fdwroutine->PlanDirectModify = oraclePlanDirectModify;
+	fdwroutine->BeginDirectModify = oracleBeginDirectModify;
+	fdwroutine->IterateDirectModify = oracleIterateDirectModify;
+	fdwroutine->EndDirectModify = oracleEndForeignScan;
+	fdwroutine->ExplainDirectModify = oracleExplainDirectModify;
 	fdwroutine->PlanForeignModify = oraclePlanForeignModify;
 	fdwroutine->BeginForeignModify = oracleBeginForeignModify;
 #if PG_VERSION_NUM >= 110000
@@ -1607,6 +1632,177 @@ oracleAddForeignUpdateTargets(
 			 errmsg("cannot update or delete on foreign Oracle table"),
 			 errdetail("UPDATE and DELETE require PostgreSQL 9.5 or later.")));
 #endif  /* PG_VERSION_NUM */
+}
+
+/*
+ * Replace a single-table scan with one remote UPDATE or DELETE.  Core checks
+ * row triggers, generated columns and view check options before calling us.
+ */
+static bool
+oraclePlanDirectModify(PlannerInfo *root, ModifyTable *plan,
+					   Index resultRelation, int subplan_index)
+{
+	Plan *subplan;
+	ForeignScan *scan;
+	RelOptInfo *foreignrel;
+	struct OracleFdwState *state, *direct;
+	List *params = NIL;
+	List *targetlist = NIL, *targetattrs = NIL;
+	ListCell *cell;
+	StringInfoData sql;
+	bool first = true;
+
+	if (plan->operation != CMD_UPDATE && plan->operation != CMD_DELETE)
+		return false;
+	if (plan->returningLists != NIL &&
+		list_nth(plan->returningLists, subplan_index) != NIL)
+		return false;
+
+#if PG_VERSION_NUM >= 140000
+	subplan = outerPlan(plan);
+#else
+	subplan = (Plan *)list_nth(plan->plans, subplan_index);
+#endif
+	/* Local joins and inherited targets retain the per-row path. */
+	if (subplan == NULL || !IsA(subplan, ForeignScan))
+		return false;
+	scan = (ForeignScan *)subplan;
+	if (scan->scan.scanrelid != resultRelation || scan->scan.plan.qual != NIL)
+		return false;
+	foreignrel = root->simple_rel_array[resultRelation];
+	state = (struct OracleFdwState *)foreignrel->fdw_private;
+	if (state->local_conds != NIL)
+		return false;
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "%s %s r%d",
+					plan->operation == CMD_UPDATE ? "UPDATE" : "DELETE FROM",
+					state->oraTable->name, resultRelation);
+	if (plan->operation == CMD_UPDATE)
+	{
+		ListCell *attrcell;
+
+#if PG_VERSION_NUM >= 140000
+		get_translated_update_targetlist(root, resultRelation, &targetlist, &targetattrs);
+#else
+		/* Use the pre-14 targetlist layout and update only named columns. */
+		{
+			RangeTblEntry *rte = planner_rt_fetch(resultRelation, root);
+			int col = -1;
+
+			if (resultRelation != root->parse->resultRelation)
+				return false;
+			while ((col = bms_next_member(rte->updatedCols, col)) >= 0)
+			{
+				AttrNumber attnum = col + FirstLowInvalidHeapAttributeNumber;
+				TargetEntry *tle = get_tle_by_resno(subplan->targetlist, attnum);
+
+				if (tle == NULL || attnum <= 0)
+					return false;
+				targetlist = lappend(targetlist, tle);
+				targetattrs = lappend_int(targetattrs, attnum);
+			}
+		}
+#endif
+		appendStringInfoString(&sql, " SET ");
+		forboth(cell, targetlist, attrcell, targetattrs)
+		{
+			TargetEntry *tle = (TargetEntry *)lfirst(cell);
+			int attnum = lfirst_int(attrcell);
+			struct oraColumn *column = NULL;
+			char *expr;
+			int i;
+
+			for (i = 0; i < state->oraTable->ncols; ++i)
+				if (state->oraTable->cols[i]->pgattnum == attnum)
+					column = state->oraTable->cols[i];
+			/* Only values already evaluated by PostgreSQL can be assigned directly. */
+			if (column == NULL || attnum <= 0 ||
+				!canHandleType(column->pgtype) || column->pgtype == UUIDOID ||
+				column->pgtypmod >= 0 ||
+				(!IsA(tle->expr, Const) && !IsA(tle->expr, Param)))
+				return false;
+			expr = deparseExpr(state->session, foreignrel, tle->expr,
+							   state->oraTable, &params, false);
+			if (expr == NULL)
+				return false;
+			checkDataType(column->oratype, column->scale, column->pgtype,
+						  state->oraTable->pgname, column->pgname);
+			appendStringInfo(&sql, "%s%s = %s", first ? "" : ", ", column->name, expr);
+			first = false;
+		}
+		if (first)
+			return false;
+	}
+
+	first = true;
+	foreach(cell, state->remote_conds)
+	{
+		char *expr = deparseExpr(state->session, foreignrel, (Expr *)lfirst(cell),
+								state->oraTable, &params, false);
+
+		if (expr == NULL)
+			return false;
+		appendStringInfo(&sql, " %s %s", first ? "WHERE" : "AND", expr);
+		first = false;
+	}
+
+	/* Commit the replacement only after every expression has been checked. */
+	direct = copyPlanData(state);
+	direct->query = sql.data;
+	scan->operation = plan->operation;
+#if PG_VERSION_NUM >= 140000
+	scan->resultRelation = resultRelation;
+#endif
+	scan->fdw_exprs = params;
+	/* The trailing flag belongs to direct DML; the shared decoder ignores it. */
+	scan->fdw_private = lappend(serializePlanData(direct), makeInteger(plan->canSetTag));
+	scan->fdw_recheck_quals = NIL;
+#if PG_VERSION_NUM >= 140000
+	scan->scan.plan.async_capable = false;
+#endif
+	return true;
+}
+
+static void
+oracleBeginDirectModify(ForeignScanState *node, int eflags)
+{
+	ForeignScan *scan = (ForeignScan *)node->ss.ps.plan;
+	struct OracleFdwState *state;
+
+	/* Reuse connection setup and expression parameter binding from scans. */
+	oracleBeginForeignScan(node, eflags);
+	state = (struct OracleFdwState *)node->fdw_state;
+	state->direct_done = false;
+	state->set_processed = intVal(llast(scan->fdw_private));
+}
+
+static TupleTableSlot *
+oracleIterateDirectModify(ForeignScanState *node)
+{
+	struct OracleFdwState *state = (struct OracleFdwState *)node->fdw_state;
+
+	if (!state->direct_done)
+	{
+		(void)setSelectParameters(state->paramList, node->ss.ps.ps_ExprContext);
+		oraclePrepareQuery(state->session, state->query, state->oraTable, 1, state->lob_prefetch);
+		state->rowcount = oracleExecuteQuery(state->session, state->oraTable, state->paramList, 1);
+		state->direct_done = true;
+		oracleCloseStatement(state->session);
+		if (state->set_processed)
+			node->ss.ps.state->es_processed += state->rowcount;
+		if (node->ss.ps.instrument)
+			node->ss.ps.instrument->tuplecount += state->rowcount;
+	}
+	return ExecClearTuple(node->ss.ss_ScanTupleSlot);
+}
+
+static void
+oracleExplainDirectModify(ForeignScanState *node, ExplainState *es)
+{
+	struct OracleFdwState *state = (struct OracleFdwState *)node->fdw_state;
+
+	ExplainPropertyText("Oracle statement", state->query, es);
 }
 
 /*
@@ -3853,16 +4049,6 @@ appendAsType(StringInfoData *dest, const char *s, Oid type)
 			appendStringInfo(dest, "%s", s);
 	}
 }
-
-/*
- * This macro is used by deparseExpr to identify PostgreSQL
- * types that can be translated to Oracle SQL.
- */
-#define canHandleType(x) ((x) == TEXTOID || (x) == CHAROID || (x) == BPCHAROID \
-			|| (x) == VARCHAROID || (x) == NAMEOID || (x) == INT8OID || (x) == INT2OID \
-			|| (x) == INT4OID || (x) == OIDOID || (x) == FLOAT4OID || (x) == FLOAT8OID \
-			|| (x) == NUMERICOID || (x) == DATEOID || (x) == TIMESTAMPOID || (x) == TIMESTAMPTZOID \
-			|| (x) == INTERVALOID || (x) == UUIDOID)
 
 /*
  * deparseExpr

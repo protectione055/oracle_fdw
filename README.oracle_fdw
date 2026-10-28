@@ -471,7 +471,7 @@ conditions were translated to Oracle and how.
 Joins between foreign tables
 ----------------------------
 
-From PostgreSQL 9.6 on, oracle_fdw can push down joins to the Oracle server,
+oracle_fdw can push down joins to the Oracle server,
 that is, a join between two foreign tables will lead to a single Oracle query
 that performs the join on the Oracle side.
 
@@ -495,10 +495,7 @@ This is allowed by default (also in databases upgraded from an earlier
 PostgreSQL release) and can be disabled by setting the **readonly**
 table option.
 
-UPDATE and DELETE require PostgreSQL 9.5 or later. Reads and INSERT are
-available on PostgreSQL 9.3 and 9.4.
-
-For UPDATE and DELETE, rows are identified by Oracle's ROWID, so no primary
+For row-by-row UPDATE and DELETE, rows are identified by Oracle's ROWID, so no primary
 key or special column option is required.  This also allows modifying tables
 that have duplicate rows.
 Legacy **key** column options are accepted for existing table definitions
@@ -516,14 +513,24 @@ The RETURNING clause on INSERT, UPDATE and DELETE is supported except
 for columns with Oracle data types LONG and LONG RAW (Oracle doesn't support
 these data types in the RETURNING clause).
 
-Triggers on foreign tables are supported from PostgreSQL 9.4.
+Triggers on foreign tables are supported.
 Triggers defined with AFTER and FOR EACH ROW require that the foreign table
 has no columns with Oracle data type LONG or LONG RAW.  This is because
 such triggers make use of the RETURNING clause mentioned above.
 
-While modifying foreign data works, the performance is not particularly
-good, specifically when many rows are affected, because (owing to the way
-foreign data wrappers work) each row has to be treated individually.
+Single-table DELETE statements can be executed as one Oracle statement when
+all WHERE conditions can be pushed down. UPDATE can use the same execution
+path when its assignments are constants or parameters and its WHERE conditions
+can be pushed down. EXPLAIN shows a Foreign Update or Foreign Delete node
+with the Oracle statement. The command tag reports the number of affected rows.
+
+Statements with RETURNING, row-level triggers, stored generated columns,
+view check options, local joins or local filters use row-by-row modification.
+Assignments with column references or expressions use that path, as do
+assignments requiring PostgreSQL domain or column length/precision checks,
+or special value conversion (such as boolean and UUID columns). INSERT continues to execute row by row.
+Direct modification avoids the per-row fetch and DML round trips, which is
+particularly useful when many rows are affected.
 
 Transactions are forwarded to Oracle, so BEGIN, COMMIT, ROLLBACK and
 SAVEPOINT work as expected.  Prepared statements involving Oracle are
@@ -586,7 +593,7 @@ by whitespace.  Keep the file small for good performance.
 Support for IMPORT FOREIGN SCHEMA
 ---------------------------------
 
-From PostgreSQL 9.5 on, IMPORT FOREIGN SCHEMA is supported to bulk import
+IMPORT FOREIGN SCHEMA is supported to bulk import
 table definitions for all tables in an Oracle schema.  
 In addition to the documentation of IMPORT FOREIGN SCHEMA, consider the
 following:
@@ -670,7 +677,7 @@ see the [Problems](#8-problems) section for details.
 oracle_fdw should compile and run on any platform supported by PostgreSQL and
 Oracle client, although I could only test it on Linux and Windows.
 
-PostgreSQL 9.3 or better is required.
+PostgreSQL 9.6 or later is required.
 
 Due to API breaks in PostgreSQL minor releases, the following PostgreSQL
 versions cannot be used:
